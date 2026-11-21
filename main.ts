@@ -5,11 +5,21 @@
 // it does is place that finished image at the output path the harness
 // asks for. Running it twice writes the same bytes both times, because
 // the file it copies never changes. Standard library only.
-import { copyFileSync, mkdirSync } from "node:fs";
+import { copyFileSync, mkdirSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const outDir = process.env.MAKEFUN_OUTPUT_DIR ?? "/output";
 mkdirSync(outDir, { recursive: true });
-copyFileSync(join(here, "entry.png"), join(outDir, "entry.png"));
+const src = join(here, "entry.png");
+const dst = join(outDir, "entry.png");
+copyFileSync(src, dst);
+// Fail loudly instead of shipping a truncated copy: the grader reads
+// whatever lands in the output directory, so verify the copy byte for byte.
+const srcBytes = statSync(src).size;
+const dstBytes = statSync(dst).size;
+if (srcBytes !== dstBytes) {
+  throw new Error(`entry.png copy mismatch: source ${srcBytes} bytes, output ${dstBytes} bytes`);
+}
+console.log(`entry.png -> ${dst} (${dstBytes} bytes)`);
