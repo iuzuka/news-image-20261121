@@ -1,200 +1,217 @@
 #!/usr/bin/env python3
-"""Compose the 21 November 2026 world-news front page (1024x1024).
+"""Compose the 21 November 2026 newspaper front page (entry.png).
 
-Layout (my own design for this edition): a navy masthead naming the day,
-a wide lead photograph with headline and deck, a second story with its
-picture on the right and text on the left, two short panels side by side,
-and a navy ticker footer. Two text-free press illustrations live in
-assets/ (a Polish air-defence radar vehicle at dawn; the Shenzhen
-convention centre at dusk). Every word is set here with PIL so the text
-stays crisp. Deterministic: fixed inputs, no clock, no randomness.
-Writes entry.png next to this file; if the PNG would pass 1 MiB it
-writes JPEG bytes instead (same filename).
+Fresh implementation: PIL composites the two generated press-style
+illustrations in assets/ with programmatic typesetting (no AI text).
+
+Run:  python3 draw_news21.py   -> writes entry.png (1024x1024, < 1 MiB)
 """
-import os
+from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-ASSETS = os.path.join(HERE, "assets")
-
+BASE = Path(__file__).resolve().parent
 W, H = 1024, 1024
 MARGIN = 20
-INNER = W - 2 * MARGIN
 
-PAPER = (246, 241, 231)
-INK = (20, 20, 20)
-NAVY = (15, 30, 51)
-RED = (176, 30, 36)
+PAPER = (247, 242, 231)
+NAVY = (28, 36, 64)
 GOLD = (201, 162, 39)
-GREY = (40, 40, 40)
+RED = (176, 58, 46)
+INK = (18, 18, 18)
+FRAME = (30, 30, 30)
 WHITE = (255, 255, 255)
 
-SERIF_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf"
-SANS_BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-SANS = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+SERIF = [
+    "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+]
+SERIF_BOLD = [
+    "/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+]
+SANS = [
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+]
+SANS_BOLD = [
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+]
 
-_cache = {}
+_font_cache = {}
 
 
-def font(path, size):
-    key = (path, size)
-    if key not in _cache:
-        _cache[key] = ImageFont.truetype(path, size)
-    return _cache[key]
+def font(paths, size):
+    """First usable font from the candidate list, cached per size."""
+    key = (tuple(paths), size)
+    if key in _font_cache:
+        return _font_cache[key]
+    for path in paths:
+        try:
+            found = ImageFont.truetype(path, size)
+            _font_cache[key] = found
+            return found
+        except (OSError, IOError):
+            continue
+    found = ImageFont.load_default()
+    _font_cache[key] = found
+    return found
 
 
-def fit(draw, text, path, size, max_width):
-    """Largest size at or below `size` that fits `max_width`."""
-    while size > 10 and draw.textlength(text, font=font(path, size)) > max_width:
+def fit(paths, text, start, width, minimum=10):
+    """Largest font size (<= start) at which text fits inside width."""
+    size = start
+    while size > minimum:
+        candidate = font(paths, size)
+        if candidate.getlength(text) <= width:
+            return candidate
         size -= 1
-    return font(path, size)
+    return font(paths, minimum)
 
 
-def wrap(draw, text, fnt, max_width):
-    lines, cur = [], ""
-    for word in text.split():
-        trial = (cur + " " + word).strip()
-        if draw.textlength(trial, font=fnt) <= max_width:
-            cur = trial
-        elif cur:
-            lines.append(cur)
-            cur = word
-        else:
-            cur = word
-    if cur:
-        lines.append(cur)
-    return lines
+def tracked_width(f, text, tracking):
+    return sum(f.getlength(ch) for ch in text) + tracking * max(0, len(text) - 1)
 
 
-def para(draw, x, y, lines, fnt, fill, leading):
+def draw_tracked(d, cx, y, text, f, fill, tracking):
+    """Draw text centred on cx with extra space between letters."""
+    total = tracked_width(f, text, tracking)
+    x = cx - total / 2
+    for ch in text:
+        d.text((x, y), ch, font=f, fill=fill)
+        x += f.getlength(ch) + tracking
+
+
+def cover(img, w, h, fx=0.5, fy=0.5):
+    """Scale the image to cover w x h, then crop around the focus point."""
+    iw, ih = img.size
+    scale = max(w / iw, h / ih)
+    nw, nh = round(iw * scale), round(ih * scale)
+    img = img.resize((nw, nh), Image.LANCZOS)
+    cx = min(max(fx * nw, w / 2), nw - w / 2)
+    cy = min(max(fy * nh, h / 2), nh - h / 2)
+    return img.crop((round(cx - w / 2), round(cy - h / 2),
+                     round(cx + w / 2), round(cy + h / 2)))
+
+
+def place_photo(page, box, path, focus=(0.5, 0.5)):
+    """Paste an illustration into box, cover-cropped, with a thin frame."""
+    x0, y0, x1, y1 = box
+    with Image.open(path) as im:
+        im = cover(im.convert("RGB"), x1 - x0, y1 - y0, *focus)
+    page.paste(im, (x0, y0))
+    d = ImageDraw.Draw(page)
+    d.rectangle([x0, y0, x1 - 1, y1 - 1], outline=FRAME, width=2)
+
+
+def headline(d, lines, x, y, width, start, leading):
+    """Bold serif headline; size shrinks until the widest line fits."""
+    probe = font(SERIF_BOLD, start)
+    widest = max(lines, key=lambda s: probe.getlength(s))
+    f = fit(SERIF_BOLD, widest, start, width)
     for line in lines:
-        draw.text((x, y), line, font=fnt, fill=fill)
+        d.text((x, y), line, font=f, fill=INK)
         y += leading
     return y
 
 
-def cover(image, width, height):
-    sw, sh = image.size
-    scale = max(width / sw, height / sh)
-    big = image.resize((round(sw * scale), round(sh * scale)), Image.LANCZOS)
-    left = (big.width - width) // 2
-    top = (big.height - height) // 2
-    return big.crop((left, top, left + width, top + height))
+def body_lines(d, lines, x, y, width, size, leading):
+    """Regular serif paragraph from pre-broken lines (each autofit)."""
+    for line in lines:
+        f = font(SERIF, size)
+        if f.getlength(line) > width:
+            f = fit(SERIF, line, size, width)
+        d.text((x, y), line, font=f, fill=INK)
+        y += leading
+    return y
 
 
-def kicker(draw, x, y, text, size=21):
-    draw.text((x, y), text, font=font(SANS_BOLD, size), fill=RED)
+def kicker(d, text, x, y, size=21):
+    f = font(SANS_BOLD, size)
+    d.text((x, y), text, font=f, fill=RED)
+    return y
 
 
-def head(draw, x, y, text, size, width, leading, fill=INK):
-    fnt = font(SERIF_BOLD, size)
-    return para(draw, x, y, wrap(draw, text, fnt, width), fnt, fill, leading)
+def rule(d, y, x0=MARGIN, x1=W - MARGIN, width=2):
+    d.rectangle([x0, y, x1 - 1, y + width - 1], fill=INK)
 
 
-def deck(draw, x, y, text, size, width, leading):
-    fnt = font(SANS, size)
-    return para(draw, x, y, wrap(draw, text, fnt, width), fnt, GREY, leading)
-
-
-def build():
-    poland = Image.open(os.path.join(
-        ASSETS,
-        "media-generation-poland-dawn-0-f03972f8-b11b-40e8-9a68-f937f0d83824.webp"))
-    shenzhen = Image.open(os.path.join(
-        ASSETS,
-        "media-generation-shenzhen-dusk-0-6ab2ed24-4f73-4426-be4b-20a1bf6cb004.webp"))
-
+def main():
     page = Image.new("RGB", (W, H), PAPER)
     d = ImageDraw.Draw(page)
-    d.rectangle([0, 0, W - 1, H - 1], outline=INK, width=4)
 
-    # Masthead.
-    d.rectangle([4, 4, W - 5, 108], fill=NAVY)
-    tag = "T H E   W O R L D   I N   O N E   P A G E"
-    tag_font = font(SANS_BOLD, 23)
-    d.text(((W - d.textlength(tag, font=tag_font)) / 2, 16),
-           tag, font=tag_font, fill=GOLD)
-    date = "SATURDAY, 21 NOVEMBER 2026"
-    date_font = fit(d, date, SERIF_BOLD, 56, INNER - 10)
-    d.text(((W - d.textlength(date, font=date_font)) / 2, 46),
-           date, font=date_font, fill=WHITE)
-    d.rectangle([4, 108, W - 5, 114], fill=RED)
+    # --- masthead ---
+    d.rectangle([0, 0, W - 1, 107], fill=NAVY)
+    d.rectangle([0, 108, W - 1, 113], fill=RED)
+    gold = font(SANS_BOLD, 27)
+    draw_tracked(d, W // 2, 14, "THE WORLD IN ONE PAGE", gold, GOLD, 7)
+    date_text = "SATURDAY, 21 NOVEMBER 2026"
+    date_f = fit(SERIF_BOLD, date_text, 58, W - 2 * MARGIN)
+    date_w = date_f.getlength(date_text)
+    d.text(((W - date_w) / 2, 46), date_text, font=date_f, fill=WHITE)
 
-    # Lead: Poland photograph, headline, deck.
-    page.paste(cover(poland, INNER, 230), (MARGIN, 126))
-    d.rectangle([MARGIN, 126, MARGIN + INNER - 1, 126 + 230 - 1],
-                outline=INK, width=2)
-    y = 368
-    kicker(d, MARGIN, y, "POLAND  •  LEAD STORY")
-    y = head(d, MARGIN, 394, "RUSSIAN MISSILES LAND IN POLAND",
-             44, INNER, 50)
-    y += 6
-    deck(d, MARGIN, y,
-         "Two cruise missiles and a drone came down in south-east Poland "
-         "during Russia's massive overnight attack on Ukraine. PM Donald "
-         "Tusk calls it a deliberate provocation; NATO chief Mark Rutte "
-         "is due in Warsaw on Saturday.",
-         21, INNER, 27)
+    # --- lead story: Poland ---
+    place_photo(page, (20, 122, 1004, 330),
+                BASE / "assets" / "media-generation-poland-dawn-0-f03972f8-b11b-40e8-9a68-f937f0d83824.webp",
+                focus=(0.5, 0.48))
+    kicker(d, "POLAND \u2022 LEAD STORY", 20, 340)
+    headline(d, ["RUSSIAN MISSILES LAND IN POLAND"], 20, 366, 984, 56, 60)
+    body_lines(d, [
+        "Two cruise missiles and a drone came down in south-east Poland during Russia's massive",
+        "overnight attack on Ukraine. PM Donald Tusk calls it a deliberate provocation; NATO chief",
+        "Mark Rutte is due in Warsaw on Saturday.",
+    ], 20, 420, 984, 20, 27)
+    rule(d, 503)
 
-    d.line([(MARGIN, 556), (MARGIN + INNER, 556)], fill=INK, width=2)
+    # --- second story: Shenzhen summit ---
+    kicker(d, "SUMMIT \u2022 SHENZHEN", 20, 518, size=20)
+    headline(d, ["TRUMP, XI AND PUTIN ISSUE JOINT", "DECLARATION"],
+             20, 544, 640, 40, 44)
+    body_lines(d, [
+        "The first-ever trilateral meeting at the APEC summit ends",
+        "with a four-point joint declaration on peace and security \u2014 but no",
+        "deal on Ukraine or Iran.",
+    ], 20, 634, 640, 19, 26)
+    place_photo(page, (682, 518, 1004, 700),
+                BASE / "assets" / "media-generation-shenzhen-dusk-0-6ab2ed24-4f73-4426-be4b-20a1bf6cb004.webp")
+    rule(d, 714)
 
-    # Second row: Shenzhen story, text left, picture right.
-    y0 = 570
-    tw = 640
-    kicker(d, MARGIN, y0, "SUMMIT  •  SHENZHEN", size=19)
-    y = head(d, MARGIN, y0 + 26,
-             "TRUMP, XI AND PUTIN ISSUE JOINT DECLARATION",
-             30, tw, 36)
-    deck(d, MARGIN, y + 4,
-         "The first-ever trilateral meeting at the APEC summit ends with "
-         "a four-point declaration on peace and security — but no deal "
-         "on Ukraine or Iran.",
-         21, tw, 27)
-    ix = MARGIN + tw + 24
-    page.paste(cover(shenzhen, INNER - tw - 24, 170), (ix, y0))
-    d.rectangle([ix, y0, ix + (INNER - tw - 24) - 1, y0 + 170 - 1],
-                outline=INK, width=2)
+    # --- bottom columns: markets and Asia ---
+    kicker(d, "MARKETS", 20, 726, size=20)
+    kicker(d, "ASIA", 522, 726, size=20)
+    headline(d, ["WALL STREET SLUMPS INTO", "CORRECTION"], 20, 752, 482, 36, 40)
+    headline(d, ["INDONESIA'S VP SEAT STILL", "VACANT"], 522, 752, 482, 36, 40)
+    body_lines(d, [
+        "The S&P 500 falls about 3.7% as AI shares sell",
+        "off, pushing US stocks into correction territory.",
+    ], 20, 830, 482, 18, 23)
+    body_lines(d, [
+        "Nine days after Gibran Rakabuming quit, the",
+        "MPR waits for President Prabowo's two names;",
+        "the vote is set for 2 December.",
+    ], 522, 830, 482, 18, 23)
 
-    d.line([(MARGIN, 754), (MARGIN + INNER, 754)], fill=INK, width=2)
+    # --- ticker ---
+    d.rectangle([0, 896, W - 1, H - 1], fill=NAVY)
+    ticker_lines = [
+        "ALSO: Mongolia's president quits \u2022 ICJ genocide verdict reverberates \u2022 UK and EU sign trade deals \u2022",
+        "Trump pardons Pete Rose \u2022 At least 11 killed in Kyiv strikes",
+    ]
+    for i, line in enumerate(ticker_lines):
+        f = font(SANS_BOLD, 18)
+        if f.getlength(line) > 984:
+            f = fit(SANS_BOLD, line, 18, 984)
+        d.text((20, 912 + i * 34), line, font=f, fill=WHITE)
 
-    # Third row: two panels.
-    col = (INNER - 24) // 2
-    y0 = 768
-    kicker(d, MARGIN, y0, "MARKETS", size=19)
-    y = head(d, MARGIN, y0 + 26, "WALL STREET SLUMPS INTO CORRECTION",
-             26, col, 31)
-    deck(d, MARGIN, y + 4,
-         "The S&P 500 falls about 3.7% as AI shares sell off, pushing "
-         "US stocks into correction territory.",
-         20, col, 26)
-
-    rx = MARGIN + col + 24
-    kicker(d, rx, y0, "ASIA", size=19)
-    y = head(d, rx, y0 + 26, "INDONESIA'S VP SEAT STILL VACANT",
-             26, col, 31)
-    deck(d, rx, y + 4,
-         "Nine days after Gibran Rakabuming quit, the MPR waits for "
-         "President Prabowo's two names; the vote is set for 2 December.",
-         20, col, 26)
-
-    # Footer ticker.
-    d.rectangle([4, 952, W - 5, 1020], fill=NAVY)
-    foot_font = font(SANS, 19)
-    ticker = ("ALSO:  Mongolia's president quits  •  ICJ genocide verdict "
-              "reverberates  •  UK and EU sign trade deals  •  Trump "
-              "pardons Pete Rose  •  At least 11 killed in Kyiv strikes")
-    y = 962
-    for line in wrap(d, ticker, foot_font, INNER - 16):
-        d.text((MARGIN + 8, y), line, font=foot_font, fill=WHITE)
-        y += 23
-
-    out = os.path.join(HERE, "entry.png")
+    out = BASE / "entry.png"
     page.save(out, format="PNG", optimize=True)
-    if os.path.getsize(out) > 1048576:
-        page.save(out, format="JPEG", quality=88, optimize=True)
-    print("wrote", out, os.path.getsize(out), "bytes")
+    size = out.stat().st_size
+    print(f"wrote {out} {page.size[0]}x{page.size[1]} {size} bytes")
+    if size >= 1024 * 1024:
+        print("WARNING: entry.png is 1 MiB or larger")
+    return 0
 
 
 if __name__ == "__main__":
-    build()
+    raise SystemExit(main())
